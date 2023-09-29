@@ -31,14 +31,10 @@ jobs:
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: ./_site
-- name: gemfile-diff
-  # You may pin to the exact commit or the version.
-  # uses: r7kamura/gemfile-diff@a63db41e3aa0ed38f33c202c705749a730a14f4b
-  uses: r7kamura/gemfile-diff@v0.1.0
-  with:
-    # Path to Gemfile.lock.
-    gemfile_lock_a: 
-    # Path to Gemfile.lock.
-    gemfile_lock_b: 
-    # Space-separated ignored gem names list. Gem written here are ignored even if there are differences.
-    ignore: # optional
+
+    - name: gemfile-diff
+      uses: r7kamura/gemfile-diff@v0.1.0
+      with:
+        gemfile_lock_a: # The path to the first Gemfile.lock goes here
+        gemfile_lock_b: # The path to the second Gemfile.lock goes here
+        ignore: # optional, space-separated ignored gem names
