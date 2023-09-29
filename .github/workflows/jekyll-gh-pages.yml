@@ -38,3 +38,8 @@ jobs:
         gemfile_lock_a: # The path to the first Gemfile.lock goes here
         gemfile_lock_b: # The path to the second Gemfile.lock goes here
         ignore: # optional, space-separated ignored gem names
+        - name: Install dependencies
+  run: |
+    gem install bundler
+    bundle install
+  working-directory: Project/.github/workflows
