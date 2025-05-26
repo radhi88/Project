@@ -1,0 +1,1255 @@
+//+------------------------------------------------------------------+
+//| Ultimate MultiStrategy EA v3.0                                   |
+//| تشغيل جميع الأوضاع معاً مع دعم كامل لأنماط الشموع اليابانية     |
+//+------------------------------------------------------------------+
+#property copyright "2025"
+#property version   "3.0"
+#property strict
+#include <Trade\Trade.mqh>
+
+CTrade trade;
+
+//--- enums
+enum SignalType { NONE, BUY, SELL };
+enum StrategyMode { MODE_CONSERVATIVE, MODE_AGGRESSIVE, MODE_SNIPER };
+enum OrderExecutionType { MARKET_EXECUTION, LIMIT_ORDERS, STOP_ORDERS };
+
+//--- inputs
+// إعدادات الأوضاع المتعددة
+input bool      EnableConservativeMode  = true;      // تفعيل الوضع المحافظ
+input bool      EnableAggressiveMode    = true;      // تفعيل الوضع العدواني
+input bool      EnableSniperMode        = true;      // تفعيل وضع القناص
+input double    ConservativeRiskPercent = 0.01;      // نسبة المخاطرة في الوضع المحافظ (1%)
+input double    AggressiveRiskPercent   = 0.002;     // نسبة المخاطرة في الوضع العدواني (0.5%)
+input double    SniperRiskPercent       = 0.02;      // نسبة المخاطرة في وضع القناص (2%)
+
+// إعدادات الفلاتر
+input bool      EnableRSIFilter         = false;     // تفعيل/تعطيل فلتر RSI
+input bool      UseSimpleMode           = true;      // تجاوز الفلاتر الثانوية
+input bool      DisableRepeating        = false;     // منع تكرار نفس الإشارة
+
+// إعدادات المؤشرات
+input int       RSI_Period               = 14;
+input int       RSI_Oversold             = 30;
+input int       RSI_Overbought           = 70;
+input int       EMA_Fast                 = 8;
+input int       EMA_Slow                 = 21;
+input ENUM_TIMEFRAMES HigherTF_EMA      = PERIOD_H1; // الإطار الزمني الأعلى لـ EMA
+
+// إدارة المخاطر
+input bool      UseFixedLot              = false;     // استخدام حجم ثابت للعقد
+input double    FixedLot                 = 0.1;       // حجم العقد الثابت
+input int       ATR_Period               = 14;
+input double    SL_Multiplier            = 1.0;       // مضاعف وقف الخسارة (ATR)
+input double    TP_Multiplier            = 1.5;       // مضاعف جني الربح (ATR)
+input double    StopLossPct              = 0.15;      // نسبة وقف الخسارة البديلة (15%)
+input double    TakeProfitPct            = 0.74;      // نسبة جني الربح البديلة (74%)
+input bool      UsePercentageTP_SL       = false;     // استخدام نسب مئوية بدلاً من ATR
+
+// إعدادات تنفيذ الأوامر
+input OrderExecutionType ExecutionType   = MARKET_EXECUTION; // نوع تنفيذ الأوامر
+input int       LimitOrderPips           = 10;        // عدد النقاط للأوامر المحددة
+input int       StopOrderPips            = 15;        // عدد النقاط لأوامر الإيقاف
+
+// حدود التداول
+input int       MaxTradesPerDay          = 5000;
+input double    MaxDailyDrawdownPercent  = 0.01;      // الحد الأقصى للخسارة اليومية (1%)
+input double    TargetBalance            = 3000.0;
+input double    ReinvestAmount           = 500.0;
+input int       StartHour                = 0;
+input int       EndHour                  = 23;
+input int       MinEMASpreadPips         = 5;         // الحد الأدنى لفرق EMA بالنقاط
+
+// إدارة المراكز
+input int       BreakevenPips            = 15;        // نقل وقف الخسارة إلى نقطة التعادل بعد X نقطة
+input int       TrailingStopPips         = 25;        // تفعيل وقف الخسارة المتحرك بعد X نقطة
+input int       MinDistanceFromMarket    = 10;        // الحد الأدنى لبُعد SL/TP عن السوق بالنقاط
+
+// إعدادات أنماط الشموع الكلاسيكية
+input bool      UseHammer                = true;      // استخدام نمط المطرقة
+input bool      UseInvertedHammer        = false;      // استخدام نمط المطرقة المقلوبة
+input bool      UseEngulfing             = false;      // استخدام نمط الابتلاع
+input bool      UseDoji                  = false;      // استخدام نمط الدوجي
+input bool      UseMarubozu              = false;      // استخدام نمط الماروبوزو
+input bool      UsePinBar                = false;      // استخدام نمط البن بار
+input bool      UseHarami                = false;      // استخدام نمط الحرامي
+input bool      UseMorningStar           = false;      // استخدام نمط نجمة الصباح
+input bool      UseEveningStar           = false;      // استخدام نمط نجمة المساء
+input bool      UsePiercingLine          = false;      // استخدام نمط خط الاختراق
+input bool      UseDarkCloudCover        = false;      // استخدام نمط الغطاء السحابي
+input bool      UseThreeWhiteSoldiers    = false;      // استخدام نمط الجنود البيض الثلاثة
+input bool      UseThreeBlackCrows       = false;      // استخدام نمط الغربان السود الثلاثة
+input bool      UseTweezer               = false;      // استخدام نمط التويزر
+input bool      UseKicker                = false;      // استخدام نمط الكيكر
+
+// إعدادات قوة الأنماط (لتوزيع الصفقات على الأوضاع)
+input bool      AutoDistributeByStrength = true;      // توزيع تلقائي للصفقات حسب قوة النمط
+input bool      UseStrongPatternsOnly    = false;     // استخدام الأنماط القوية فقط في وضع القناص
+
+//--- globals
+string       g_symbol;
+int          g_digits;
+int          g_magic_conservative = 123456;
+int          g_magic_aggressive   = 234567;
+int          g_magic_sniper       = 345678;
+int          hRSI, hATR, hEMAFast, hEMASlow, hEMA_HigherTF_Fast, hEMA_HigherTF_Slow;
+int          g_tradeCount          = 0;
+int          g_lastDay             = -1;
+bool         g_paused              = false;
+bool         g_reinvesting         = false;
+double       g_dayOpenBalance;
+
+double       g_currentRiskPercentage;
+int          g_consecutiveWins     = 0;
+int          g_consecutiveLosses   = 0;
+static string lastSignal           = "";
+static ulong lastProcessedDeal     = 0;
+
+// متغيرات لتتبع الصفقات في كل وضع
+int          g_conservative_trades = 0;
+int          g_aggressive_trades   = 0;
+int          g_sniper_trades       = 0;
+
+//--- prototypes
+// دوال أنماط الشموع الكلاسيكية
+bool    IsHammer(bool bullish);
+bool    IsInvertedHammer(bool bullish);
+bool    IsEngulfing(bool bullish);
+bool    IsDoji();
+bool    IsMarubozu(bool bullish);
+bool    IsPinBar(bool bullish);
+bool    IsHarami(bool bullish);
+bool    IsMorningStar();
+bool    IsEveningStar();
+bool    IsPiercingLine();
+bool    IsDarkCloudCover();
+bool    IsThreeWhiteSoldiers();
+bool    IsThreeBlackCrows();
+bool    IsTweezerBottom();
+bool    IsTweezerTop();
+bool    IsBullishKicker();
+bool    IsBearishKicker();
+
+// دوال مساعدة
+double  GetValue(int handle, ENUM_TIMEFRAMES tf, int shift=0);
+double  CalculateLotSize(double riskPercent);
+void    CheckAndAdjustPositions();
+double  PipsToPoints(double pips);
+void    HandleAdaptiveLot();
+bool    ExecuteTrade(SignalType sig, string patternName, StrategyMode mode);
+int     GetPatternStrength(string patternName);
+
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   g_symbol = Symbol();
+   g_digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
+
+   hRSI = iRSI(g_symbol, PERIOD_CURRENT, RSI_Period, PRICE_CLOSE);
+   if(hRSI == INVALID_HANDLE)
+     {
+      Print("Failed to get RSI handle");
+      return(INIT_FAILED);
+     }
+   hATR = iATR(g_symbol, PERIOD_CURRENT, ATR_Period);
+   if(hATR == INVALID_HANDLE)
+     {
+      Print("Failed to get ATR handle");
+      return(INIT_FAILED);
+     }
+   hEMAFast = iMA(g_symbol, PERIOD_CURRENT, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   if(hEMAFast == INVALID_HANDLE)
+     {
+      Print("Failed to get EMA Fast handle");
+      return(INIT_FAILED);
+     }
+   hEMASlow = iMA(g_symbol, PERIOD_CURRENT, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+   if(hEMASlow == INVALID_HANDLE)
+     {
+      Print("Failed to get EMA Slow handle");
+      return(INIT_FAILED);
+     }
+   hEMA_HigherTF_Fast = iMA(g_symbol, HigherTF_EMA, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   if(hEMA_HigherTF_Fast == INVALID_HANDLE)
+     {
+      Print("Failed to get Higher TF EMA Fast handle");
+      return(INIT_FAILED);
+     }
+   hEMA_HigherTF_Slow = iMA(g_symbol, HigherTF_EMA, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+   if(hEMA_HigherTF_Slow == INVALID_HANDLE)
+     {
+      Print("Failed to get Higher TF EMA Slow handle");
+      return(INIT_FAILED);
+     }
+
+   g_dayOpenBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_currentRiskPercentage = ConservativeRiskPercent;
+
+   EventSetTimer(2); // فحص حجم العقد التكيفي كل 2 ثانية
+
+   Print("EA initialized with version 3.0 - Ultimate MultiStrategy with Candlestick Patterns");
+   Print("Enabled Modes: ",
+         EnableConservativeMode ? "Conservative " : "",
+         EnableAggressiveMode ? "Aggressive " : "",
+         EnableSniperMode ? "Sniper" : "");
+   Print("Execution Type: ", EnumToString(ExecutionType));
+
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   EventKillTimer();
+  }
+
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+   HandleAdaptiveLot();
+  }
+
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| دالة OnTick                                                      |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   datetime now = TimeCurrent();
+   MqlDateTime tm;
+   TimeToStruct(now, tm);
+
+// إعادة ضبط اليوم الجديد
+   if(tm.day != g_lastDay)
+     {
+      g_lastDay = tm.day;
+      g_tradeCount = 0;
+      g_conservative_trades = 0;
+      g_aggressive_trades = 0;
+      g_sniper_trades = 0;
+      g_paused = false;
+      g_reinvesting = false;
+      g_dayOpenBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      g_currentRiskPercentage = ConservativeRiskPercent;
+      g_consecutiveWins = 0;
+      g_consecutiveLosses = 0;
+      lastSignal = "";
+     }
+
+   double curBal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double dd = (g_dayOpenBalance - curBal) / g_dayOpenBalance;
+
+   if(dd > MaxDailyDrawdownPercent)
+     {
+      if(!g_reinvesting) g_paused = true;
+      Comment("⛔ تم الوصول للحد الأقصى للخسارة اليومية");
+      return;
+     }
+
+   if(g_paused && !g_reinvesting)
+      return;
+
+   if(!g_reinvesting && curBal >= TargetBalance)
+     {
+      g_reinvesting = true;
+      g_paused = true;
+      Comment("💰 تم الوصول للهدف المالي. وضع إعادة الاستثمار نشط. EA متوقف.");
+      return;
+     }
+
+   if(g_reinvesting && curBal <= TargetBalance - ReinvestAmount)
+     {
+      g_reinvesting = false;
+      g_paused = false;
+      Comment("🔄 تم إنفاق مبلغ إعادة الاستثمار. استئناف التداول.");
+     }
+
+   if(tm.hour < StartHour || tm.hour > EndHour)
+      return;
+
+   if(g_tradeCount >= MaxTradesPerDay)
+      return;
+
+   CheckAndAdjustPositions();
+
+   if(EnableAggressiveMode)
+     {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(!PositionSelectByTicket(ticket))
+            continue;
+         if(PositionGetInteger(POSITION_MAGIC) != g_magic_aggressive)
+            continue;
+
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+
+         if(profit > 0 && (now - openTime) >= 3)
+           {
+            trade.PositionClose(ticket);
+           }
+        }
+     }
+
+   double rsi    = GetValue(hRSI, PERIOD_CURRENT);
+   double fEMA   = GetValue(hEMAFast, PERIOD_CURRENT);
+   double sEMA   = GetValue(hEMASlow, PERIOD_CURRENT);
+   double hfEMA  = GetValue(hEMA_HigherTF_Fast, HigherTF_EMA);
+   double hsEMA  = GetValue(hEMA_HigherTF_Slow, HigherTF_EMA);
+
+   bool emaSpreadOK = MathAbs(fEMA - sEMA) >= PipsToPoints(MinEMASpreadPips);
+
+   if(!emaSpreadOK && !UseSimpleMode)
+     {
+      Comment("الصفقات:", g_tradeCount,
+              " | الخسارة:", DoubleToString(dd * 100, 2), "%",
+              " | فرق EMA صغير جداً (", MinEMASpreadPips, " نقطة)");
+      return;
+     }
+
+   SignalType sig = NONE;
+   string patternName = "";
+   int patternStrength = 0;
+
+// اكتشاف الأنماط الشمعية
+   if(fEMA > sEMA || UseSimpleMode)
+     {
+      if(UseHammer && IsHammer(true))
+        {
+         sig = BUY;
+         patternName = "Hammer";
+         patternStrength = 3;
+        }
+      else
+         if(UseInvertedHammer && IsInvertedHammer(true))
+           {
+            sig = BUY;
+            patternName = "InvertedHammer";
+            patternStrength = 2;
+           }
+         else
+            if(UseEngulfing && IsEngulfing(true))
+              {
+               sig = BUY;
+               patternName = "Engulfing";
+               patternStrength = 4;
+              }
+            else
+               if(UseDoji && IsDoji())
+                 {
+                  sig = BUY;
+                  patternName = "Doji";
+                  patternStrength = 1;
+                 }
+               else
+                  if(UseMarubozu && IsMarubozu(true))
+                    {
+                     sig = BUY;
+                     patternName = "Marubozu";
+                     patternStrength = 4;
+                    }
+                  else
+                     if(UsePinBar && IsPinBar(true))
+                       {
+                        sig = BUY;
+                        patternName = "PinBar";
+                        patternStrength = 3;
+                       }
+                     else
+                        if(UseHarami && IsHarami(true))
+                          {
+                           sig = BUY;
+                           patternName = "Harami";
+                           patternStrength = 2;
+                          }
+                        else
+                           if(UseMorningStar && IsMorningStar())
+                             {
+                              sig = BUY;
+                              patternName = "MorningStar";
+                              patternStrength = 5;
+                             }
+                           else
+                              if(UsePiercingLine && IsPiercingLine())
+                                {
+                                 sig = BUY;
+                                 patternName = "PiercingLine";
+                                 patternStrength = 3;
+                                }
+                              else
+                                 if(UseThreeWhiteSoldiers && IsThreeWhiteSoldiers())
+                                   {
+                                    sig = BUY;
+                                    patternName = "ThreeWhiteSoldiers";
+                                    patternStrength = 5;
+                                   }
+                                 else
+                                    if(UseTweezer && IsTweezerBottom())
+                                      {
+                                       sig = BUY;
+                                       patternName = "TweezerBottom";
+                                       patternStrength = 3;
+                                      }
+                                    else
+                                       if(UseKicker && IsBullishKicker())
+                                         {
+                                          sig = BUY;
+                                          patternName = "BullishKicker";
+                                          patternStrength = 5;
+                                         }
+     }
+   else
+      if(fEMA < sEMA || UseSimpleMode)
+        {
+         if(UseHammer && IsHammer(false))
+           {
+            sig = SELL;
+            patternName = "Hammer";
+            patternStrength = 3;
+           }
+         else
+            if(UseInvertedHammer && IsInvertedHammer(false))
+              {
+               sig = SELL;
+               patternName = "InvertedHammer";
+               patternStrength = 2;
+              }
+            else
+               if(UseEngulfing && IsEngulfing(false))
+                 {
+                  sig = SELL;
+                  patternName = "Engulfing";
+                  patternStrength = 4;
+                 }
+               else
+                  if(UseDoji && IsDoji())
+                    {
+                     sig = SELL;
+                     patternName = "Doji";
+                     patternStrength = 1;
+                    }
+                  else
+                     if(UseMarubozu && IsMarubozu(false))
+                       {
+                        sig = SELL;
+                        patternName = "Marubozu";
+                        patternStrength = 4;
+                       }
+                     else
+                        if(UsePinBar && IsPinBar(false))
+                          {
+                           sig = SELL;
+                           patternName = "PinBar";
+                           patternStrength = 3;
+                          }
+                        else
+                           if(UseHarami && IsHarami(false))
+                             {
+                              sig = SELL;
+                              patternName = "Harami";
+                              patternStrength = 2;
+                             }
+                           else
+                              if(UseEveningStar && IsEveningStar())
+                                {
+                                 sig = SELL;
+                                 patternName = "EveningStar";
+                                 patternStrength = 5;
+                                }
+                              else
+                                 if(UseDarkCloudCover && IsDarkCloudCover())
+                                   {
+                                    sig = SELL;
+                                    patternName = "DarkCloudCover";
+                                    patternStrength = 3;
+                                   }
+                                 else
+                                    if(UseThreeBlackCrows && IsThreeBlackCrows())
+                                      {
+                                       sig = SELL;
+                                       patternName = "ThreeBlackCrows";
+                                       patternStrength = 5;
+                                      }
+                                    else
+                                       if(UseTweezer && IsTweezerTop())
+                                         {
+                                          sig = SELL;
+                                          patternName = "TweezerTop";
+                                          patternStrength = 3;
+                                         }
+                                       else
+                                          if(UseKicker && IsBearishKicker())
+                                            {
+                                             sig = SELL;
+                                             patternName = "BearishKicker";
+                                             patternStrength = 5;
+                                            }
+        }
+
+   bool rsiCondition = !EnableRSIFilter ||
+                       (sig == BUY && rsi < RSI_Oversold) ||
+                       (sig == SELL && rsi > RSI_Overbought);
+
+   if(sig != NONE && rsiCondition && (!DisableRepeating || lastSignal != patternName))
+     {
+      if(AutoDistributeByStrength)
+        {
+         if(patternStrength >= 4 && EnableSniperMode && (!UseStrongPatternsOnly || patternStrength >= 4))
+           {
+            if(ExecuteTrade(sig, patternName, MODE_SNIPER))
+              {
+               g_sniper_trades++;
+               g_tradeCount++;
+              }
+           }
+         if(patternStrength >= 2 && EnableAggressiveMode)
+           {
+            if(ExecuteTrade(sig, patternName, MODE_AGGRESSIVE))
+              {
+               g_aggressive_trades++;
+               g_tradeCount++;
+              }
+           }
+         if(EnableConservativeMode)
+           {
+            if(ExecuteTrade(sig, patternName, MODE_CONSERVATIVE))
+              {
+               g_conservative_trades++;
+               g_tradeCount++;
+              }
+           }
+        }
+      else
+        {
+         if(EnableConservativeMode)
+           {
+            if(ExecuteTrade(sig, patternName, MODE_CONSERVATIVE))
+              {
+               g_conservative_trades++;
+               g_tradeCount++;
+              }
+           }
+         if(EnableAggressiveMode)
+           {
+            if(ExecuteTrade(sig, patternName, MODE_AGGRESSIVE))
+              {
+               g_aggressive_trades++;
+               g_tradeCount++;
+              }
+           }
+         if(EnableSniperMode && (!UseStrongPatternsOnly || patternStrength >= 4))
+           {
+            if(ExecuteTrade(sig, patternName, MODE_SNIPER))
+              {
+               g_sniper_trades++;
+               g_tradeCount++;
+              }
+           }
+        }
+
+      lastSignal = patternName;
+     }
+
+   Comment("الصفقات اليوم: ", g_tradeCount, "/", MaxTradesPerDay,
+           " | محافظ: ", g_conservative_trades,
+           " | عدواني: ", g_aggressive_trades,
+           " | قناص: ", g_sniper_trades,
+           " | الخسارة اليومية: ", DoubleToString(dd * 100, 2), "%",
+           " | آخر إشارة: ", sig == BUY ? "شراء" : sig == SELL ? "بيع" : "لا يوجد", " (", patternName, ")",
+           " | قوة النمط: ", patternStrength,
+           " | RSI: ", DoubleToString(rsi, 2));
+  }
+
+//+------------------------------------------------------------------+
+//| حماية من SL/TP القريب من السوق                                 |
+//+------------------------------------------------------------------+
+void AdjustSLTPAwayFromMarket(double &sl, double &tp, long type)
+{
+   double marketPrice = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(g_symbol, SYMBOL_BID)
+                                                    : SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+
+   double minDistance = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if(minDistance < _Point * MinDistanceFromMarket)
+      minDistance = _Point * MinDistanceFromMarket;
+
+   if(type == POSITION_TYPE_BUY)
+   {
+      if(sl >= marketPrice || (marketPrice - sl) < minDistance)
+         sl = marketPrice - minDistance;
+
+      if(tp <= marketPrice || (tp - marketPrice) < minDistance)
+         tp = marketPrice + minDistance;
+   }
+   else
+   {
+      if(sl <= marketPrice || (sl - marketPrice) < minDistance)
+         sl = marketPrice + minDistance;
+
+      if(tp >= marketPrice || (marketPrice - tp) < minDistance)
+         tp = marketPrice - minDistance;
+   }
+
+   if(fabs(tp - sl) < _Point * 2)
+   {
+      tp = marketPrice + ((type == POSITION_TYPE_BUY) ? minDistance * 1.5 : -minDistance * 1.5);
+   }
+}
+
+
+//+------------------------------------------------------------------+
+bool ExecuteTrade(SignalType sig, string patternName, StrategyMode mode)
+  {
+   if(mode == MODE_SNIPER && UseStrongPatternsOnly && GetPatternStrength(patternName) < 4)
+      return false;
+
+   double price = (sig == BUY) ? SymbolInfoDouble(g_symbol, SYMBOL_ASK)
+                  : SymbolInfoDouble(g_symbol, SYMBOL_BID);
+
+   double atr = GetValue(hATR, PERIOD_CURRENT);
+   if(atr <= 0)
+      atr = _Point * 100;
+
+   double stopLoss, takeProfit;
+   double riskPercent;
+   int magic;
+
+   switch(mode)
+     {
+      case MODE_CONSERVATIVE:
+         riskPercent = ConservativeRiskPercent;
+         magic = g_magic_conservative;
+         break;
+      case MODE_AGGRESSIVE:
+         riskPercent = AggressiveRiskPercent;
+         magic = g_magic_aggressive;
+         break;
+      case MODE_SNIPER:
+         riskPercent = SniperRiskPercent;
+         magic = g_magic_sniper;
+         break;
+      default:
+         riskPercent = ConservativeRiskPercent;
+         magic = g_magic_conservative;
+         break;
+     }
+
+   if(UsePercentageTP_SL)
+     {
+      stopLoss = (sig == BUY) ? price * (1 - StopLossPct)
+                 : price * (1 + StopLossPct);
+      takeProfit = (sig == BUY) ? price * (1 + TakeProfitPct)
+                   : price * (1 - TakeProfitPct);
+     }
+   else
+     {
+      double slMultiplier = SL_Multiplier;
+      double tpMultiplier = TP_Multiplier;
+
+      if(mode == MODE_AGGRESSIVE)
+        {
+         slMultiplier *= 0.7;
+         tpMultiplier *= 0.7;
+        }
+      else if(mode == MODE_SNIPER)
+        {
+         slMultiplier *= 1.2;
+         tpMultiplier *= 2.0;
+        }
+
+      stopLoss = (sig == BUY) ? price - atr * slMultiplier
+                 : price + atr * slMultiplier;
+      takeProfit = (sig == BUY) ? price + atr * tpMultiplier
+                   : price - atr * tpMultiplier;
+     }
+
+   stopLoss = NormalizeDouble(stopLoss, g_digits);
+   takeProfit = NormalizeDouble(takeProfit, g_digits);
+
+   if((sig == BUY && (stopLoss >= price || takeProfit <= price)) ||
+      (sig == SELL && (stopLoss <= price || takeProfit >= price)))
+     {
+      stopLoss = 0;
+      takeProfit = 0;
+     }
+
+   // ✅ أمان إضافي ضد SL/TP قريب من السوق
+   long type = (sig == BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+   AdjustSLTPAwayFromMarket(stopLoss, takeProfit, type);
+
+   double lotSize = CalculateLotSize(riskPercent);
+   bool result = false;
+
+   trade.SetExpertMagicNumber(magic);
+
+   switch(ExecutionType)
+     {
+      case MARKET_EXECUTION:
+         result = trade.PositionOpen(g_symbol,
+                                     (sig == BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,
+                                     lotSize, NormalizeDouble(price, g_digits),
+                                     stopLoss, takeProfit);
+         break;
+
+      case LIMIT_ORDERS:
+        {
+         double limitPrice = (sig == BUY) ? price - PipsToPoints(LimitOrderPips)
+                             : price + PipsToPoints(LimitOrderPips);
+         limitPrice = NormalizeDouble(limitPrice, g_digits);
+         result = (sig == BUY) ? trade.BuyLimit(lotSize, limitPrice, g_symbol, stopLoss, takeProfit)
+                  : trade.SellLimit(lotSize, limitPrice, g_symbol, stopLoss, takeProfit);
+         break;
+        }
+
+      case STOP_ORDERS:
+        {
+         double stopPrice = (sig == BUY) ? price + PipsToPoints(StopOrderPips)
+                            : price - PipsToPoints(StopOrderPips);
+         stopPrice = NormalizeDouble(stopPrice, g_digits);
+         result = (sig == BUY) ? trade.BuyStop(lotSize, stopPrice, g_symbol, stopLoss, takeProfit)
+                  : trade.SellStop(lotSize, stopPrice, g_symbol, stopLoss, takeProfit);
+         break;
+        }
+     }
+
+   if(result)
+     {
+      Print("✅ صفقة ", (sig == BUY ? "شراء" : "بيع"), " على نمط ", patternName, " في وضع ",
+            (mode == MODE_CONSERVATIVE ? "محافظ" : mode == MODE_AGGRESSIVE ? "عدواني" : "قناص"),
+            " بحجم ", DoubleToString(lotSize, 2));
+     }
+   else
+     {
+      Print("❌ فشل تنفيذ الصفقة: ", GetLastError());
+     }
+
+   return result;
+  }
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void HandleAdaptiveLot()
+  {
+// اختيار التاريخ للأيام السبعة الماضية
+   HistorySelect(TimeCurrent() - 86400 * 7, TimeCurrent());
+
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = HistoryDealGetTicket(i);
+
+      if(ticket <= lastProcessedDeal)
+         break;
+
+      // التحقق من أي صفقة تابعة للإكسبرت (أي وضع)
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != g_magic_conservative &&
+         HistoryDealGetInteger(ticket, DEAL_MAGIC) != g_magic_aggressive &&
+         HistoryDealGetInteger(ticket, DEAL_MAGIC) != g_magic_sniper)
+         continue;
+
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+         continue;
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+
+      if(profit > 0)
+        {
+         g_consecutiveWins++;
+         g_consecutiveLosses = 0;
+        }
+      else
+        {
+         g_consecutiveLosses++;
+         g_consecutiveWins = 0;
+        }
+
+      lastProcessedDeal = ticket;
+      break;
+     }
+  }
+
+//+------------------------------------------------------------------+
+double PipsToPoints(double pips)
+  {
+   return pips * SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+double GetValue(int handle, ENUM_TIMEFRAMES tf, int shift = 0)
+  {
+   double buf[];
+   if(CopyBuffer(handle, 0, shift, 1, buf) <= 0)
+     {
+      Print("❌ فشل نسخ البيانات من المؤشر (handle = ", handle, ")");
+      return 0.0;
+     }
+   return buf[0];
+  }
+
+//+------------------------------------------------------------------+
+double CalculateLotSize(double riskPercent)
+  {
+   if(UseFixedLot)
+      return FixedLot;
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double atr = GetValue(hATR, PERIOD_CURRENT);
+   if(atr <= 0)
+      atr = _Point * 100; // ATR افتراضي إذا لم يكن متاحاً
+
+   double riskDollar = equity * riskPercent;
+   double slPips = atr * SL_Multiplier / SymbolInfoDouble(g_symbol, SYMBOL_POINT); // تحويل ATR إلى نقاط لحساب SL
+   if(slPips <= 0)
+      slPips = 10; // SL افتراضي إذا كان ATR صفراً أو سالباً
+
+   double tickValue = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
+
+// حساب القيمة لكل لوت لكل نقطة
+   double dollarPerPip = tickValue / SymbolInfoDouble(g_symbol, SYMBOL_POINT); // قيمة النقطة الواحدة لكل لوت
+
+// تجنب القسمة على صفر
+   if(dollarPerPip <= 0)
+      dollarPerPip = 0.01; // قيمة افتراضية صغيرة إذا تعذر تحديدها
+
+   double lot = riskDollar / (slPips * dollarPerPip);
+
+   double minLot = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_STEP);
+
+   lot = MathMax(minLot, MathMin(maxLot, MathRound(lot / step) * step));
+   return lot;
+  }
+
+//+------------------------------------------------------------------+
+void CheckAndAdjustPositions()
+  {
+   int total = PositionsTotal();
+   for(int idx = total - 1; idx >= 0; idx--) // التكرار للخلف للإغلاق الآمن للمراكز
+     {
+      ulong ticket = PositionGetTicket(idx);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      // التحقق من أن الصفقة تابعة للإكسبرت (أي وضع)
+      long magic = PositionGetInteger(POSITION_MAGIC);
+      if(magic != g_magic_conservative && magic != g_magic_aggressive && magic != g_magic_sniper)
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol)
+         continue;
+
+      long   type  = PositionGetInteger(POSITION_TYPE);
+      double openP = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);
+      double currentPrice = (type == POSITION_TYPE_BUY ?
+                             SymbolInfoDouble(g_symbol, SYMBOL_BID) :
+                             SymbolInfoDouble(g_symbol, SYMBOL_ASK));
+
+      // نقل SL إلى نقطة التعادل
+      if(BreakevenPips > 0)
+        {
+         double pipsProfit = (type == POSITION_TYPE_BUY ?
+                              (currentPrice - openP) / SymbolInfoDouble(g_symbol, SYMBOL_POINT) :
+                              (openP - currentPrice) / SymbolInfoDouble(g_symbol, SYMBOL_POINT));
+         if(pipsProfit >= BreakevenPips)
+           {
+            double newSL = openP; // ضبط SL على سعر الفتح
+            if(sl == 0 || (type == POSITION_TYPE_BUY && newSL > sl) || (type == POSITION_TYPE_SELL && newSL < sl))
+              {
+               AdjustSLTPAwayFromMarket(newSL, tp, type); // ✅ حماية من القرب للسوق
+               trade.PositionModify(ticket, NormalizeDouble(newSL, g_digits), tp);
+              }
+           }
+        }
+
+      // وقف الخسارة المتحرك
+      if(TrailingStopPips > 0)
+        {
+         double profitPips = (type == POSITION_TYPE_BUY ?
+                              (currentPrice - openP) / SymbolInfoDouble(g_symbol, SYMBOL_POINT) :
+                              (openP - currentPrice) / SymbolInfoDouble(g_symbol, SYMBOL_POINT));
+
+         if(profitPips >= TrailingStopPips)
+           {
+            double newSL = (type == POSITION_TYPE_BUY ?
+                            currentPrice - PipsToPoints(TrailingStopPips) :
+                            currentPrice + PipsToPoints(TrailingStopPips));
+            // تعديل فقط إذا كان newSL أفضل (أبعد في الربح) من SL الحالي
+            if((type == POSITION_TYPE_BUY && newSL > sl) ||
+               (type == POSITION_TYPE_SELL && newSL < sl) || sl == 0)
+              {
+               AdjustSLTPAwayFromMarket(newSL, tp, type); // ✅ حماية من القرب للسوق
+               trade.PositionModify(ticket, NormalizeDouble(newSL, g_digits), tp);
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+// تنفيذ دوال أنماط الشموع
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+bool IsHammer(bool bullish)
+  {
+   double o = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double h = iHigh(g_symbol, PERIOD_CURRENT, 0);
+   double l = iLow(g_symbol, PERIOD_CURRENT, 0);
+   double body = MathAbs(c - o);
+   double lowerWick = MathMin(o, c) - l;
+   double upperWick = h - MathMax(o, c);
+   double range = h - l;
+
+   if(body == 0 || range == 0)
+      return false;
+
+// المطرقة: جسم صغير في الأعلى وظل سفلي طويل
+   return (body <= 0.3 * range &&
+           lowerWick >= 2 * body &&
+           upperWick <= 0.1 * range &&
+           (bullish ? c > o : true));
+  }
+
+//+------------------------------------------------------------------+
+bool IsInvertedHammer(bool bullish)
+  {
+   double o = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double h = iHigh(g_symbol, PERIOD_CURRENT, 0);
+   double l = iLow(g_symbol, PERIOD_CURRENT, 0);
+   double body = MathAbs(c - o);
+   double lowerWick = MathMin(o, c) - l;
+   double upperWick = h - MathMax(o, c);
+   double range = h - l;
+
+   if(body == 0 || range == 0)
+      return false;
+
+// المطرقة المقلوبة: جسم صغير في الأسفل وظل علوي طويل
+   return (body <= 0.3 * range &&
+           upperWick >= 2 * body &&
+           lowerWick <= 0.1 * range &&
+           (bullish ? c > o : true));
+  }
+
+//+------------------------------------------------------------------+
+bool IsEngulfing(bool bullish)
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+
+   if(bullish)
+     {
+      // نمط ابتلاع صاعد: شمعة صاعدة تبتلع شمعة هابطة سابقة
+      return (c1 < o1 && c0 > o0 && o0 <= c1 && c0 >= o1);
+     }
+   else
+     {
+      // نمط ابتلاع هابط: شمعة هابطة تبتلع شمعة صاعدة سابقة
+      return (c1 > o1 && c0 < o0 && o0 >= c1 && c0 <= o1);
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool IsDoji()
+  {
+   double o = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double h = iHigh(g_symbol, PERIOD_CURRENT, 0);
+   double l = iLow(g_symbol, PERIOD_CURRENT, 0);
+   double range = h - l;
+
+   if(range == 0)
+      return false;
+
+// الدوجي: جسم صغير جداً مقارنة بالمدى الكلي
+   return (MathAbs(c - o) <= 0.1 * range);
+  }
+
+//+------------------------------------------------------------------+
+bool IsMarubozu(bool bullish)
+  {
+   double o = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double h = iHigh(g_symbol, PERIOD_CURRENT, 0);
+   double l = iLow(g_symbol, PERIOD_CURRENT, 0);
+   double body = MathAbs(c - o);
+   double range = h - l;
+
+   if(range == 0)
+      return false;
+
+// الماروبوزو: شمعة ذات جسم كبير وظلال صغيرة جداً أو معدومة
+   if(body >= 0.9 * range)
+     {
+      if(bullish)
+        {
+         return (c > o && h - c <= 0.1 * range && o - l <= 0.1 * range);
+        }
+      else
+        {
+         return (c < o && h - o <= 0.1 * range && c - l <= 0.1 * range);
+        }
+     }
+
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+bool IsPinBar(bool bullish)
+  {
+   double o = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double h = iHigh(g_symbol, PERIOD_CURRENT, 0);
+   double l = iLow(g_symbol, PERIOD_CURRENT, 0);
+   double body = MathAbs(c - o);
+   double upperWick = h - MathMax(o, c);
+   double lowerWick = MathMin(o, c) - l;
+   double range = h - l;
+
+   if(range == 0 || body == 0)
+      return false;
+
+   if(bullish)
+     {
+      // بن بار صاعد: ظل سفلي طويل، جسم صغير، ظل علوي صغير
+      return (lowerWick > 2 * body &&
+              upperWick < body &&
+              body < range / 3 &&
+              c > o &&
+              upperWick < lowerWick / 3);
+     }
+   else
+     {
+      // بن بار هابط: ظل علوي طويل، جسم صغير، ظل سفلي صغير
+      return (upperWick > 2 * body &&
+              lowerWick < body &&
+              body < range / 3 &&
+              c < o &&
+              lowerWick < upperWick / 3);
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool IsHarami(bool bullish)
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+   double body0 = MathAbs(c0 - o0);
+   double body1 = MathAbs(c1 - o1);
+
+   if(bullish)
+     {
+      // حرامي صاعد: شمعة صاعدة صغيرة داخل شمعة هابطة كبيرة
+      return (c1 < o1 && c0 > o0 && body0 < body1 &&
+              o0 > c1 && o0 < o1 && c0 > c1 && c0 < o1);
+     }
+   else
+     {
+      // حرامي هابط: شمعة هابطة صغيرة داخل شمعة صاعدة كبيرة
+      return (c1 > o1 && c0 < o0 && body0 < body1 &&
+              o0 < c1 && o0 > o1 && c0 < c1 && c0 > o1);
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool IsMorningStar()
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+   double o2 = iOpen(g_symbol, PERIOD_CURRENT, 2);
+   double c2 = iClose(g_symbol, PERIOD_CURRENT, 2);
+   double body0 = MathAbs(c0 - o0);
+   double body1 = MathAbs(c1 - o1);
+   double body2 = MathAbs(c2 - o2);
+   double range1 = iHigh(g_symbol, PERIOD_CURRENT, 1) - iLow(g_symbol, PERIOD_CURRENT, 1);
+
+// نجمة الصباح: شمعة هابطة كبيرة، تليها شمعة صغيرة، ثم شمعة صاعدة كبيرة
+   return (c2 < o2 && body2 > 0.5 * range1 &&
+           body1 < 0.3 * body2 &&
+           c0 > o0 && body0 > 0.5 * range1 &&
+           c0 > (o2 + c2) / 2);
+  }
+
+//+------------------------------------------------------------------+
+bool IsEveningStar()
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+   double o2 = iOpen(g_symbol, PERIOD_CURRENT, 2);
+   double c2 = iClose(g_symbol, PERIOD_CURRENT, 2);
+   double body0 = MathAbs(c0 - o0);
+   double body1 = MathAbs(c1 - o1);
+   double body2 = MathAbs(c2 - o2);
+   double range1 = iHigh(g_symbol, PERIOD_CURRENT, 1) - iLow(g_symbol, PERIOD_CURRENT, 1);
+
+// نجمة المساء: شمعة صاعدة كبيرة، تليها شمعة صغيرة، ثم شمعة هابطة كبيرة
+   return (c2 > o2 && body2 > 0.5 * range1 &&
+           body1 < 0.3 * body2 &&
+           c0 < o0 && body0 > 0.5 * range1 &&
+           c0 < (o2 + c2) / 2);
+  }
+
+//+------------------------------------------------------------------+
+bool IsPiercingLine()
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+   double body1 = MathAbs(c1 - o1);
+
+// خط الاختراق: شمعة هابطة تليها شمعة صاعدة تفتح أقل من إغلاق الشمعة السابقة وتغلق فوق منتصف جسم الشمعة السابقة
+   return (c1 < o1 && c0 > o0 && o0 < c1 && c0 > (o1 + c1) / 2 && c0 < o1);
+  }
+
+//+------------------------------------------------------------------+
+bool IsDarkCloudCover()
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+   double body1 = MathAbs(c1 - o1);
+
+// الغطاء السحابي: شمعة صاعدة تليها شمعة هابطة تفتح أعلى من إغلاق الشمعة السابقة وتغلق تحت منتصف جسم الشمعة السابقة
+   return (c1 > o1 && c0 < o0 && o0 > c1 && c0 < (o1 + c1) / 2 && c0 > o1);
+  }
+
+//+------------------------------------------------------------------+
+bool IsThreeWhiteSoldiers()
+  {
+// الجنود البيض الثلاثة: ثلاث شموع صاعدة متتالية، كل واحدة تفتح داخل جسم السابقة وتغلق أعلى من إغلاق السابقة
+   if(iClose(g_symbol, PERIOD_CURRENT, 0) <= iOpen(g_symbol, PERIOD_CURRENT, 0) ||
+      iClose(g_symbol, PERIOD_CURRENT, 1) <= iOpen(g_symbol, PERIOD_CURRENT, 1) ||
+      iClose(g_symbol, PERIOD_CURRENT, 2) <= iOpen(g_symbol, PERIOD_CURRENT, 2))
+      return false;
+
+   if(iClose(g_symbol, PERIOD_CURRENT, 0) <= iClose(g_symbol, PERIOD_CURRENT, 1) ||
+      iClose(g_symbol, PERIOD_CURRENT, 1) <= iClose(g_symbol, PERIOD_CURRENT, 2))
+      return false;
+
+   if(iOpen(g_symbol, PERIOD_CURRENT, 0) < iOpen(g_symbol, PERIOD_CURRENT, 1) ||
+      iOpen(g_symbol, PERIOD_CURRENT, 0) > iClose(g_symbol, PERIOD_CURRENT, 1) ||
+      iOpen(g_symbol, PERIOD_CURRENT, 1) < iOpen(g_symbol, PERIOD_CURRENT, 2) ||
+      iOpen(g_symbol, PERIOD_CURRENT, 1) > iClose(g_symbol, PERIOD_CURRENT, 2))
+      return false;
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+bool IsThreeBlackCrows()
+  {
+// الغربان السود الثلاثة: ثلاث شموع هابطة متتالية، كل واحدة تفتح داخل جسم السابقة وتغلق أقل من إغلاق السابقة
+   if(iClose(g_symbol, PERIOD_CURRENT, 0) >= iOpen(g_symbol, PERIOD_CURRENT, 0) ||
+      iClose(g_symbol, PERIOD_CURRENT, 1) >= iOpen(g_symbol, PERIOD_CURRENT, 1) ||
+      iClose(g_symbol, PERIOD_CURRENT, 2) >= iOpen(g_symbol, PERIOD_CURRENT, 2))
+      return false;
+
+   if(iClose(g_symbol, PERIOD_CURRENT, 0) >= iClose(g_symbol, PERIOD_CURRENT, 1) ||
+      iClose(g_symbol, PERIOD_CURRENT, 1) >= iClose(g_symbol, PERIOD_CURRENT, 2))
+      return false;
+
+   if(iOpen(g_symbol, PERIOD_CURRENT, 0) > iOpen(g_symbol, PERIOD_CURRENT, 1) ||
+      iOpen(g_symbol, PERIOD_CURRENT, 0) < iClose(g_symbol, PERIOD_CURRENT, 1) ||
+      iOpen(g_symbol, PERIOD_CURRENT, 1) > iOpen(g_symbol, PERIOD_CURRENT, 2) ||
+      iOpen(g_symbol, PERIOD_CURRENT, 1) < iClose(g_symbol, PERIOD_CURRENT, 2))
+      return false;
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+bool IsTweezerBottom()
+  {
+   double l0 = iLow(g_symbol, PERIOD_CURRENT, 0);
+   double l1 = iLow(g_symbol, PERIOD_CURRENT, 1);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+
+// تويزر بوتوم: شمعتان متتاليتان لهما نفس القاع تقريباً، الأولى هابطة والثانية صاعدة
+   return (MathAbs(l0 - l1) <= PipsToPoints(2) && c1 < o1 && c0 > o0);
+  }
+
+//+------------------------------------------------------------------+
+bool IsTweezerTop()
+  {
+   double h0 = iHigh(g_symbol, PERIOD_CURRENT, 0);
+   double h1 = iHigh(g_symbol, PERIOD_CURRENT, 1);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+
+// تويزر توب: شمعتان متتاليتان لهما نفس القمة تقريباً، الأولى صاعدة والثانية هابطة
+   return (MathAbs(h0 - h1) <= PipsToPoints(2) && c1 > o1 && c0 < o0);
+  }
+
+//+------------------------------------------------------------------+
+bool IsBullishKicker()
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+
+// كيكر صاعد: شمعة هابطة تليها شمعة صاعدة تفتح بفجوة صعودية كبيرة
+   return (c1 < o1 && c0 > o0 && o0 > o1 && o0 - o1 > PipsToPoints(5));
+  }
+
+//+------------------------------------------------------------------+
+bool IsBearishKicker()
+  {
+   double o0 = iOpen(g_symbol, PERIOD_CURRENT, 0);
+   double c0 = iClose(g_symbol, PERIOD_CURRENT, 0);
+   double o1 = iOpen(g_symbol, PERIOD_CURRENT, 1);
+   double c1 = iClose(g_symbol, PERIOD_CURRENT, 1);
+
+// كيكر هابط: شمعة صاعدة تليها شمعة هابطة تفتح بفجوة هبوطية كبيرة
+   return (c1 > o1 && c0 < o0 && o0 < o1 && o1 - o0 > PipsToPoints(5));
+  }
+
+//+------------------------------------------------------------------+
+// دالة لتحديد قوة النمط (1-5)
+int GetPatternStrength(string patternName)
+  {
+   if(patternName == "MorningStar" || patternName == "EveningStar" ||
+      patternName == "ThreeWhiteSoldiers" || patternName == "ThreeBlackCrows" ||
+      patternName == "BullishKicker" || patternName == "BearishKicker")
+      return 5; // أنماط قوية جداً
+
+   if(patternName == "Engulfing" || patternName == "Marubozu")
+      return 4; // أنماط قوية
+
+   if(patternName == "Hammer" || patternName == "PinBar" ||
+      patternName == "PiercingLine" || patternName == "DarkCloudCover" ||
+      patternName == "TweezerBottom" || patternName == "TweezerTop")
+      return 3; // أنماط متوسطة القوة
+
+   if(patternName == "InvertedHammer" || patternName == "Harami")
+      return 2; // أنماط ضعيفة
+
+   if(patternName == "Doji")
+      return 1; // أنماط ضعيفة جداً
+
+   return 0; // غير معروف
+  }
+
+//+------------------------------------------------------------------+
