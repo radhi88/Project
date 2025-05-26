@@ -1,0 +1,961 @@
+
+//+------------------------------------------------------------------+
+‏//|                                     MultiStrategy_EA_Flexible.mq5 |
+‏//|                        Copyright 2025, MetaQuotes Software Corp. |
+‏//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+‏#property copyright "Copyright 2025, MetaQuotes Software Corp."
+‏#property link      "https://www.mql5.com"
+‏#property version   "1.00"
+‏#property strict
+‏#property indicator_chart_window
+‏#property indicator_buffers 0
+‏#property indicator_plots 0
+
+‏// Signal types
+‏enum ENUM_SIGNAL_TYPE
+{
+‏   SIGNAL_NONE,   // No signal
+‏   SIGNAL_BUY,    // Buy signal
+‏   SIGNAL_SELL    // Sell signal
+};
+
+‏// Strategy modes
+‏enum ENUM_STRATEGY_MODE
+{
+‏   MODE_FULL,     // Full strategy (all conditions)
+‏   MODE_REDUCED   // Reduced strategy (RSI + MACD only)
+};
+
+‏// Input parameters
+‏input ENUM_STRATEGY_MODE Strategy_Mode = MODE_REDUCED;  // Strategy Mode
+‏input int RSI_Period = 10;              // RSI Period
+‏input int RSI_Oversold = 25;            // RSI Oversold Level
+‏input int RSI_Overbought = 75;          // RSI Overbought Level
+‏input double Fixed_Lot = 0.1;           // Fixed Lot Size
+‏input bool Use_Fixed_Lot = true;        // Use Fixed Lot Size
+‏input double Risk_Percent = 1.0;        // Risk Percent (if not using fixed lot)
+‏input int ATR_Period = 10;              // ATR Period for SL/TP
+‏input double SL_ATR_Multiplier = 0.6;   // Stop Loss ATR Multiplier
+‏input double TP_ATR_Multiplier = 6.0;   // Take Profit ATR Multiplier
+‏input bool Draw_Arrows = true;          // Draw Signal Arrows
+‏input bool Draw_SLTP_Lines = true;      // Draw SL/TP Lines
+‏input bool Show_Indicator_Values = true; // Show Indicator Values on Chart
+‏input color Buy_Color = clrLimeGreen;   // Buy Signal Color
+‏input color Sell_Color = clrRed;        // Sell Signal Color
+‏input bool Enable_Logging = true;       // Enable Trade Logging2.5)
+
+‏// Global variables
+‏string g_symbol;
+‏int g_digits;
+‏int g_magic_number = 123456;
+
+‏// Indicator handles
+‏int g_rsi_handle;
+‏int g_macd_handle;
+‏int g_ema5_handle;
+‏int g_ema20_handle;
+‏int g_ema100_handle;
+‏int g_atr_handle;
+
+‏// GUI elements
+‏string g_status_label_name;
+‏string g_rsi_label_name;
+‏string g_macd_label_name;
+‏string g_ema_label_name;
+‏string g_price_label_name;
+
+‏// Log file
+‏int g_log_file_handle = INVALID_HANDLE;
+‏string g_log_file_path;
+
+//+------------------------------------------------------------------+
+‏//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+‏int OnInit()
+{
+‏    // Initialize symbol info
+‏    g_symbol = Symbol();
+‏    g_digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
+    
+‏    // Initialize indicators
+‏    g_rsi_handle = iRSI(g_symbol, PERIOD_CURRENT, RSI_Period, PRICE_CLOSE);
+‏    g_macd_handle = iMACD(g_symbol, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE);
+‏    g_ema5_handle = iMA(g_symbol, PERIOD_CURRENT, 5, 0, MODE_EMA, PRICE_CLOSE);
+‏    g_ema20_handle = iMA(g_symbol, PERIOD_CURRENT, 20, 0, MODE_EMA, PRICE_CLOSE);
+‏    g_ema100_handle = iMA(g_symbol, PERIOD_CURRENT, 100, 0, MODE_EMA, PRICE_CLOSE);
+‏    g_atr_handle = iATR(g_symbol, PERIOD_CURRENT, ATR_Period);
+    
+‏    // Check if indicators were created successfully
+‏    if(g_rsi_handle == INVALID_HANDLE || g_macd_handle == INVALID_HANDLE || 
+‏       g_ema5_handle == INVALID_HANDLE || g_ema20_handle == INVALID_HANDLE || 
+‏       g_ema100_handle == INVALID_HANDLE || g_atr_handle == INVALID_HANDLE)
+    {
+‏        Print("Failed to create indicators. Error code: ", GetLastError());
+‏        return INIT_FAILED;
+    }
+    
+‏    // Initialize GUI
+‏    g_status_label_name = "StatusLabel_" + g_symbol;
+‏    g_rsi_label_name = "RSILabel_" + g_symbol;
+‏    g_macd_label_name = "MACDLabel_" + g_symbol;
+‏    g_ema_label_name = "EMALabel_" + g_symbol;
+‏    g_price_label_name = "PriceLabel_" + g_symbol;
+    
+‏    if(!ObjectCreate(0, g_status_label_name, OBJ_LABEL, 0, 0, 0))
+    {
+‏        Print("Failed to create status label. Error code: ", GetLastError());
+‏        return INIT_FAILED;
+    }
+    
+‏    // Set label properties
+‏    ObjectSetInteger(0, g_status_label_name, OBJPROP_XDISTANCE, 20);
+‏    ObjectSetInteger(0, g_status_label_name, OBJPROP_YDISTANCE, 20);
+‏    ObjectSetInteger(0, g_status_label_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+‏    ObjectSetInteger(0, g_status_label_name, OBJPROP_COLOR, clrWhite);
+‏    ObjectSetString(0, g_status_label_name, OBJPROP_TEXT, "EA Ready - Mode: " + (Strategy_Mode == MODE_FULL ? "Full" : "Reduced"));
+‏    ObjectSetInteger(0, g_status_label_name, OBJPROP_FONTSIZE, 10);
+‏    ObjectSetInteger(0, g_status_label_name, OBJPROP_SELECTABLE, false);
+    
+‏    // Create indicator value labels if enabled
+‏    if(Show_Indicator_Values)
+    {
+‏        // RSI Label
+‏        if(!ObjectCreate(0, g_rsi_label_name, OBJ_LABEL, 0, 0, 0))
+        {
+‏            Print("Failed to create RSI label. Error code: ", GetLastError());
+‏            return INIT_FAILED;
+        }
+        
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_XDISTANCE, 20);
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_YDISTANCE, 40);
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_COLOR, clrWhite);
+‏        ObjectSetString(0, g_rsi_label_name, OBJPROP_TEXT, "RSI: N/A");
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_FONTSIZE, 10);
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_SELECTABLE, false);
+        
+‏        // MACD Label
+‏        if(!ObjectCreate(0, g_macd_label_name, OBJ_LABEL, 0, 0, 0))
+        {
+‏            Print("Failed to create MACD label. Error code: ", GetLastError());
+‏            return INIT_FAILED;
+        }
+        
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_XDISTANCE, 20);
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_YDISTANCE, 60);
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_COLOR, clrWhite);
+‏        ObjectSetString(0, g_macd_label_name, OBJPROP_TEXT, "MACD: N/A");
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_FONTSIZE, 10);
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_SELECTABLE, false);
+        
+‏        // EMA Label
+‏        if(!ObjectCreate(0, g_ema_label_name, OBJ_LABEL, 0, 0, 0))
+        {
+‏            Print("Failed to create EMA label. Error code: ", GetLastError());
+‏            return INIT_FAILED;
+        }
+        
+‏        ObjectSetInteger(0, g_ema_label_name, OBJPROP_XDISTANCE, 20);
+‏        ObjectSetInteger(0, g_ema_label_name, OBJPROP_YDISTANCE, 80);
+‏        ObjectSetInteger(0, g_ema_label_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+‏        ObjectSetInteger(0, g_ema_label_name, OBJPROP_COLOR, clrWhite);
+‏        ObjectSetString(0, g_ema_label_name, OBJPROP_TEXT, "EMA: N/A");
+‏        ObjectSetInteger(0, g_ema_label_name, OBJPROP_FONTSIZE, 10);
+‏        ObjectSetInteger(0, g_ema_label_name, OBJPROP_SELECTABLE, false);
+        
+‏        // Price Label
+‏        if(!ObjectCreate(0, g_price_label_name, OBJ_LABEL, 0, 0, 0))
+        {
+‏            Print("Failed to create Price label. Error code: ", GetLastError());
+‏            return INIT_FAILED;
+        }
+        
+‏        ObjectSetInteger(0, g_price_label_name, OBJPROP_XDISTANCE, 20);
+‏        ObjectSetInteger(0, g_price_label_name, OBJPROP_YDISTANCE, 100);
+‏        ObjectSetInteger(0, g_price_label_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+‏        ObjectSetInteger(0, g_price_label_name, OBJPROP_COLOR, clrWhite);
+‏        ObjectSetString(0, g_price_label_name, OBJPROP_TEXT, "Price: N/A");
+‏        ObjectSetInteger(0, g_price_label_name, OBJPROP_FONTSIZE, 10);
+‏        ObjectSetInteger(0, g_price_label_name, OBJPROP_SELECTABLE, false);
+    }
+    
+‏    // Initialize log file
+‏    if(Enable_Logging)
+    {
+‏        InitializeLogFile();
+    }
+    
+‏    Print("EA Initialized - Strategy Mode: ", (Strategy_Mode == MODE_FULL ? "Full" : "Reduced"));
+‏    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+‏//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+‏void OnDeinit(const int reason)
+{
+‏    // Release indicator handles
+‏    if(g_rsi_handle != INVALID_HANDLE)
+‏        IndicatorRelease(g_rsi_handle);
+        
+‏    if(g_macd_handle != INVALID_HANDLE)
+‏        IndicatorRelease(g_macd_handle);
+        
+‏    if(g_ema5_handle != INVALID_HANDLE)
+‏        IndicatorRelease(g_ema5_handle);
+        
+‏    if(g_ema20_handle != INVALID_HANDLE)
+‏        IndicatorRelease(g_ema20_handle);
+        
+‏    if(g_ema100_handle != INVALID_HANDLE)
+‏        IndicatorRelease(g_ema100_handle);
+        
+‏    if(g_atr_handle != INVALID_HANDLE)
+‏        IndicatorRelease(g_atr_handle);
+    
+‏    // Remove GUI elements
+‏    ObjectDelete(0, g_status_label_name);
+    
+‏    if(Show_Indicator_Values)
+    {
+‏        ObjectDelete(0, g_rsi_label_name);
+‏        ObjectDelete(0, g_macd_label_name);
+‏        ObjectDelete(0, g_ema_label_name);
+‏        ObjectDelete(0, g_price_label_name);
+    }
+    
+‏    // Clean up chart objects
+‏    CleanupChartObjects();
+    
+‏    // Close log file
+‏    if(g_log_file_handle != INVALID_HANDLE)
+    {
+‏        FileClose(g_log_file_handle);
+‏        g_log_file_handle = INVALID_HANDLE;
+    }
+    
+‏    Print("EA Deinitialized");
+}
+
+//+------------------------------------------------------------------+
+‏//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+‏void OnTick()
+{
+‏    // Check if market is open
+‏    if(!IsMarketOpen())
+‏        return;
+    
+‏    // Get indicator values
+‏    double rsi = GetRSI(0);
+‏    double macdMain = GetMACDMain(0);
+‏    double macdSignal = GetMACDSignal(0);
+‏    double ema5 = GetEMA5(0);
+‏    double ema20 = GetEMA20(0);
+‏    double ema100 = GetEMA100(0);
+‏    double price = SymbolInfoDouble(g_symbol, SYMBOL_LAST);
+    
+‏    // Update indicator values on chart if enabled
+‏    if(Show_Indicator_Values)
+    {
+‏        UpdateIndicatorLabels(rsi, macdMain, macdSignal, ema5, ema20, ema100, price);
+    }
+    
+‏    // Get signal
+‏    ENUM_SIGNAL_TYPE signal = CheckSignal(rsi, macdMain, macdSignal, ema5, ema20, ema100, price);
+    
+‏    // Update GUI
+‏    UpdateGUI(signal);
+    
+‏    // Execute trade if signal exists
+‏    if(signal != SIGNAL_NONE)
+    {
+‏        double lotSize = CalculateLotSize(signal);
+‏        ExecuteTrade(signal, lotSize);
+    }
+}
+
+//+------------------------------------------------------------------+
+‏//| Update indicator labels on chart                                 |
+//+------------------------------------------------------------------+
+‏void UpdateIndicatorLabels(double rsi, double macdMain, double macdSignal, 
+‏                          double ema5, double ema20, double ema100, double price)
+{
+‏    // Format RSI label
+‏    string rsiText = "RSI: " + DoubleToString(rsi, 2);
+‏    if(rsi < RSI_Oversold)
+‏        rsiText += " (Oversold)";
+‏    else if(rsi > RSI_Overbought)
+‏        rsiText += " (Overbought)";
+    
+‏    // Format MACD label
+‏    string macdText = "MACD: Main=" + DoubleToString(macdMain, 5) + 
+‏                     " Signal=" + DoubleToString(macdSignal, 5);
+‏    if(macdMain > macdSignal)
+‏        macdText += " (Bullish)";
+‏    else if(macdMain < macdSignal)
+‏        macdText += " (Bearish)";
+    
+‏    // Format EMA label
+‏    string emaText = "EMA: 5=" + DoubleToString(ema5, g_digits) + 
+‏                    " 20=" + DoubleToString(ema20, g_digits) + 
+‏                    " 100=" + DoubleToString(ema100, g_digits);
+    
+‏    // Format Price label
+‏    string priceText = "Price: " + DoubleToString(price, g_digits);
+‏    if(price > ema100)
+‏        priceText += " (Above EMA100)";
+‏    else
+‏        priceText += " (Below EMA100)";
+    
+‏    // Update labels
+‏    ObjectSetString(0, g_rsi_label_name, OBJPROP_TEXT, rsiText);
+‏    ObjectSetString(0, g_macd_label_name, OBJPROP_TEXT, macdText);
+‏    ObjectSetString(0, g_ema_label_name, OBJPROP_TEXT, emaText);
+‏    ObjectSetString(0, g_price_label_name, OBJPROP_TEXT, priceText);
+    
+‏    // Set colors based on conditions
+‏    if(rsi < RSI_Oversold)
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_COLOR, Buy_Color);
+‏    else if(rsi > RSI_Overbought)
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_COLOR, Sell_Color);
+‏    else
+‏        ObjectSetInteger(0, g_rsi_label_name, OBJPROP_COLOR, clrWhite);
+    
+‏    if(macdMain > macdSignal)
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_COLOR, Buy_Color);
+‏    else if(macdMain < macdSignal)
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_COLOR, Sell_Color);
+‏    else
+‏        ObjectSetInteger(0, g_macd_label_name, OBJPROP_COLOR, clrWhite);
+}
+
+//+------------------------------------------------------------------+
+‏//| Check if market is open                                          |
+//+------------------------------------------------------------------+
+‏bool IsMarketOpen()
+{
+‏    // Check if symbol is tradable
+‏    if(!SymbolInfoInteger(g_symbol, SYMBOL_TRADE_MODE))
+    {
+‏        UpdateGUI(SIGNAL_NONE, "Market Closed");
+‏        return false;
+    }
+    
+‏    // Check if trading is allowed
+‏    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+    {
+‏        UpdateGUI(SIGNAL_NONE, "Trading Not Allowed");
+‏        return false;
+    }
+    
+‏    return true;
+}
+
+//+------------------------------------------------------------------+
+‏//| Check for trading signals                                        |
+//+------------------------------------------------------------------+
+‏ENUM_SIGNAL_TYPE CheckSignal(double rsi, double macdMain, double macdSignal, 
+‏                           double ema5, double ema20, double ema100, double price)
+{
+‏    double atr = GetATR(0);
+‏    if (atr < 0.0005) return SIGNAL_NONE;  // // تجاهل السوق الضعيف
+
+‏    bool safeFromEMA100 = MathAbs(price - ema100) / price > 0.0015;  // فلتر: لا تدخل إذا قريب من EMA100
+
+‏    // Buy conditions
+‏    bool buyRsiCondition = (rsi < 25);  // تم خفض oversold
+‏    bool buyMacdCondition = (macdMain > macdSignal);
+‏    bool buyEma5vs20Condition = (ema5 > ema20);
+
+‏    // Sell conditions
+‏    bool sellRsiCondition = (rsi > 75);  // تم رفع overbought
+‏    bool sellMacdCondition = (macdMain < macdSignal);
+‏    bool sellEma5vs20Condition = (ema5 < ema20);
+
+‏    if (Strategy_Mode == MODE_FULL)
+    {
+‏        if(buyRsiCondition && buyMacdCondition && buyEma5vs20Condition && safeFromEMA100 && price > ema20)
+‏            return SIGNAL_BUY;
+
+‏        if(sellRsiCondition && sellMacdCondition && sellEma5vs20Condition && safeFromEMA100)
+‏            return SIGNAL_SELL;
+    }
+‏    else
+    {
+‏        if(buyRsiCondition && buyMacdCondition)
+‏            return SIGNAL_BUY;
+
+‏        if(sellRsiCondition && sellMacdCondition)
+‏            return SIGNAL_SELL;
+    }
+
+‏    return SIGNAL_NONE;
+}
+
+//+------------------------------------------------------------------+
+‏//| Calculate lot size based on risk settings                        |
+//+------------------------------------------------------------------+
+‏double CalculateLotSize(ENUM_SIGNAL_TYPE signalType)
+{
+‏    double lotSize;
+
+‏    if (Use_Fixed_Lot)
+    {
+‏        lotSize = Fixed_Lot;
+    }
+‏    else
+    {
+‏        // Calculate lot size based on risk percent
+‏        double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+‏        double riskAmount = accountBalance * Risk_Percent / 100.0;
+
+‏        // Calculate stop loss points
+‏        double atr = GetATR(0);
+‏        double stopLossPoints = atr * SL_ATR_Multiplier;
+
+‏        // Convert to lot size safely
+‏        double tickValue = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
+‏        double tickSize  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
+
+‏        if (tickSize == 0.0)
+        {
+‏            Print("⚠️ tickSize is zero. Skipping lot size calculation.");
+‏            return 0.0;
+        }
+
+‏        double pointValue = tickValue * (stopLossPoints / tickSize);
+‏        if (pointValue == 0.0)
+        {
+‏            Print("⚠️ pointValue is zero. Skipping lot size calculation.");
+‏            return 0.0;
+        }
+
+‏        lotSize = riskAmount / pointValue;
+    }
+
+‏    // Normalize lot size
+‏    double minLot  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
+‏    double maxLot  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MAX);
+‏    double lotStep = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_STEP);
+
+‏    lotSize = MathMax(minLot, lotSize);
+‏    lotSize = MathMin(maxLot, lotSize);
+
+‏    int steps = (int)MathRound(lotSize / lotStep);
+‏    lotSize = steps * lotStep;
+
+‏    return NormalizeDouble(lotSize, 2);
+}
+
+//+------------------------------------------------------------------+
+‏//| Execute trade based on signal                                    |
+//+------------------------------------------------------------------+
+‏void ExecuteTrade(ENUM_SIGNAL_TYPE signalType, double lotSize)
+{
+‏    // Calculate SL/TP levels
+‏    double atr = GetATR(0);
+‏    double stopLoss, takeProfit;
+    
+‏    if(signalType == SIGNAL_BUY)
+    {
+‏        double entryPrice = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+‏        stopLoss = entryPrice - (atr * SL_ATR_Multiplier);
+‏        takeProfit = entryPrice + (atr * TP_ATR_Multiplier);
+        
+‏        // Execute buy order
+‏        if(OpenBuyPosition(lotSize, stopLoss, takeProfit))
+        {
+‏            Print("Buy position opened at ", entryPrice, " with lot size ", lotSize);
+        }
+    }
+‏    else if(signalType == SIGNAL_SELL)
+    {
+‏        double entryPrice = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+‏        stopLoss = entryPrice + (atr * SL_ATR_Multiplier);
+‏        takeProfit = entryPrice - (atr * TP_ATR_Multiplier);
+        
+‏        // Execute sell order
+‏        if(OpenSellPosition(lotSize, stopLoss, takeProfit))
+        {
+‏            Print("Sell position opened at ", entryPrice, " with lot size ", lotSize);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+‏//| Open a buy position                                              |
+//+------------------------------------------------------------------+
+‏bool OpenBuyPosition(double lotSize, double stopLoss, double takeProfit)
+{
+‏    // Normalize SL and TP
+‏    stopLoss = NormalizeDouble(stopLoss, g_digits);
+‏    takeProfit = NormalizeDouble(takeProfit, g_digits);
+    
+‏    // Create trade object
+‏    MqlTradeRequest request;
+‏    MqlTradeResult result;
+‏    ZeroMemory(request);
+‏    ZeroMemory(result);
+    
+‏    // Set trade parameters
+‏    request.action = TRADE_ACTION_DEAL;
+‏    request.symbol = g_symbol;
+‏    request.volume = lotSize;
+‏    request.type = ORDER_TYPE_BUY;
+‏    request.price = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+‏    request.sl = stopLoss;
+‏    request.tp = takeProfit;
+‏    request.deviation = 10;
+‏    request.magic = g_magic_number;
+‏    request.comment = "MultiStrategy EA Buy";
+    
+‏    // Execute trade
+‏    if(!OrderSend(request, result))
+    {
+‏        Print("Failed to open buy position. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Draw signal arrow
+‏    if(Draw_Arrows)
+    {
+‏        DrawSignalArrow(ORDER_TYPE_BUY, request.price);
+    }
+    
+‏    // Draw SL/TP lines
+‏    if(Draw_SLTP_Lines)
+    {
+‏        DrawSLTPLines(ORDER_TYPE_BUY, request.price, stopLoss, takeProfit);
+    }
+    
+‏    // Log trade
+‏    if(Enable_Logging)
+    {
+‏        LogTrade(TimeCurrent(), "BUY", request.price, lotSize, stopLoss, takeProfit, 0);
+    }
+    
+‏    return true;
+}
+
+//+------------------------------------------------------------------+
+‏//| Open a sell position                                             |
+//+------------------------------------------------------------------+
+‏bool OpenSellPosition(double lotSize, double stopLoss, double takeProfit)
+{
+‏    // Normalize SL and TP
+‏    stopLoss = NormalizeDouble(stopLoss, g_digits);
+‏    takeProfit = NormalizeDouble(takeProfit, g_digits);
+    
+‏    // Create trade object
+‏    MqlTradeRequest request;
+‏    MqlTradeResult result;
+‏    ZeroMemory(request);
+‏    ZeroMemory(result);
+    
+‏    // Set trade parameters
+‏    request.action = TRADE_ACTION_DEAL;
+‏    request.symbol = g_symbol;
+‏    request.volume = lotSize;
+‏    request.type = ORDER_TYPE_SELL;
+‏    request.price = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+‏    request.sl = stopLoss;
+‏    request.tp = takeProfit;
+‏    request.deviation = 10;
+‏    request.magic = g_magic_number;
+‏    request.comment = "MultiStrategy EA Sell";
+    
+‏    // Execute trade
+‏    if(!OrderSend(request, result))
+    {
+‏        Print("Failed to open sell position. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Draw signal arrow
+‏    if(Draw_Arrows)
+    {
+‏        DrawSignalArrow(ORDER_TYPE_SELL, request.price);
+    }
+    
+‏    // Draw SL/TP lines
+‏    if(Draw_SLTP_Lines)
+    {
+‏        DrawSLTPLines(ORDER_TYPE_SELL, request.price, stopLoss, takeProfit);
+    }
+    
+‏    // Log trade
+‏    if(Enable_Logging)
+    {
+‏        LogTrade(TimeCurrent(), "SELL", request.price, lotSize, stopLoss, takeProfit, 0);
+    }
+    
+‏    return true;
+}
+
+//+------------------------------------------------------------------+
+‏//| Update GUI with current status                                   |
+//+------------------------------------------------------------------+
+‏void UpdateGUI(ENUM_SIGNAL_TYPE signalType, string customText = "")
+{
+‏    string statusText;
+‏    color statusColor = clrWhite;
+    
+‏    if(customText != "")
+    {
+‏        statusText = customText;
+    }
+‏    else
+    {
+‏        string modeText = (Strategy_Mode == MODE_FULL) ? "Full" : "Reduced";
+        
+‏        switch(signalType)
+        {
+‏            case SIGNAL_NONE:
+‏                statusText = "No Signal - Mode: " + modeText;
+‏                break;
+‏            case SIGNAL_BUY:
+‏                statusText = "Buy Signal - Mode: " + modeText;
+‏                statusColor = Buy_Color;
+‏                break;
+‏            case SIGNAL_SELL:
+‏                statusText = "Sell Signal - Mode: " + modeText;
+‏                statusColor = Sell_Color;
+‏                break;
+‏            default:
+‏                statusText = "Unknown Signal - Mode: " + modeText;
+‏                break;
+        }
+    }
+    
+‏    // Update status label
+‏    ObjectSetString(0, g_status_label_name, OBJPROP_TEXT, statusText);
+‏    ObjectSetInteger(0, g_status_label_name, OBJPROP_COLOR, statusColor);
+    
+‏    // Refresh chart
+‏    ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+‏//| Draw signal arrow on chart                                       |
+//+------------------------------------------------------------------+
+‏bool DrawSignalArrow(int orderType, double price)
+{
+‏    // Generate unique name for arrow
+‏    string arrowName = "Arrow_" + g_symbol + "_" + IntegerToString(TimeCurrent());
+    
+‏    // Set arrow code and color
+‏    uchar arrowCode;
+‏    color arrowColor;
+    
+‏    if(orderType == ORDER_TYPE_BUY)
+    {
+‏        arrowCode = 233; // Up arrow
+‏        arrowColor = Buy_Color;
+    }
+‏    else
+    {
+‏        arrowCode = 234; // Down arrow
+‏        arrowColor = Sell_Color;
+    }
+    
+‏    // Create arrow object
+‏    if(!ObjectCreate(0, arrowName, OBJ_ARROW, 0, TimeCurrent(), price))
+    {
+‏        Print("Failed to create arrow object. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Set arrow properties
+‏    ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE, arrowCode);
+‏    ObjectSetInteger(0, arrowName, OBJPROP_COLOR, arrowColor);
+‏    ObjectSetInteger(0, arrowName, OBJPROP_WIDTH, 2);
+‏    ObjectSetInteger(0, arrowName, OBJPROP_SELECTABLE, false);
+    
+‏    // Refresh chart
+‏    ChartRedraw();
+    
+‏    return true;
+}
+
+//+------------------------------------------------------------------+
+‏//| Draw SL/TP lines on chart                                        |
+//+------------------------------------------------------------------+
+‏bool DrawSLTPLines(int orderType, double entryPrice, double stopLoss, double takeProfit)
+{
+‏    // Generate unique names for lines
+‏    string entryLineName = "EntryLine_" + g_symbol + "_" + IntegerToString(TimeCurrent());
+‏    string slLineName = "SLLine_" + g_symbol + "_" + IntegerToString(TimeCurrent());
+‏    string tpLineName = "TPLine_" + g_symbol + "_" + IntegerToString(TimeCurrent());
+    
+‏    // Set line colors
+‏    color entryColor = (orderType == ORDER_TYPE_BUY) ? Buy_Color : Sell_Color;
+‏    color slColor = clrRed;
+‏    color tpColor = clrGreen;
+    
+‏    // Create entry line
+‏    if(!ObjectCreate(0, entryLineName, OBJ_HLINE, 0, 0, entryPrice))
+    {
+‏        Print("Failed to create entry line. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Set entry line properties
+‏    ObjectSetInteger(0, entryLineName, OBJPROP_COLOR, entryColor);
+‏    ObjectSetInteger(0, entryLineName, OBJPROP_STYLE, STYLE_SOLID);
+‏    ObjectSetInteger(0, entryLineName, OBJPROP_WIDTH, 1);
+‏    ObjectSetInteger(0, entryLineName, OBJPROP_SELECTABLE, false);
+    
+‏    // Create SL line
+‏    if(!ObjectCreate(0, slLineName, OBJ_HLINE, 0, 0, stopLoss))
+    {
+‏        Print("Failed to create SL line. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Set SL line properties
+‏    ObjectSetInteger(0, slLineName, OBJPROP_COLOR, slColor);
+‏    ObjectSetInteger(0, slLineName, OBJPROP_STYLE, STYLE_DOT);
+‏    ObjectSetInteger(0, slLineName, OBJPROP_WIDTH, 1);
+‏    ObjectSetInteger(0, slLineName, OBJPROP_SELECTABLE, false);
+    
+‏    // Create TP line
+‏    if(!ObjectCreate(0, tpLineName, OBJ_HLINE, 0, 0, takeProfit))
+    {
+‏        Print("Failed to create TP line. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Set TP line properties
+‏    ObjectSetInteger(0, tpLineName, OBJPROP_COLOR, tpColor);
+‏    ObjectSetInteger(0, tpLineName, OBJPROP_STYLE, STYLE_DOT);
+‏    ObjectSetInteger(0, tpLineName, OBJPROP_WIDTH, 1);
+‏    ObjectSetInteger(0, tpLineName, OBJPROP_SELECTABLE, false);
+    
+‏    // Refresh chart
+‏    ChartRedraw();
+    
+‏    return true;
+}
+
+//+------------------------------------------------------------------+
+‏//| Clean up chart objects                                           |
+//+------------------------------------------------------------------+
+‏void CleanupChartObjects()
+{
+‏    // Delete all objects created by this EA
+‏    for(int i = ObjectsTotal(0, 0) - 1; i >= 0; i--)
+    {
+‏        string objectName = ObjectName(0, i);
+        
+‏        // Check if object was created by this EA
+‏        if(StringFind(objectName, "Arrow_" + g_symbol) == 0 ||
+‏           StringFind(objectName, "EntryLine_" + g_symbol) == 0 ||
+‏           StringFind(objectName, "SLLine_" + g_symbol) == 0 ||
+‏           StringFind(objectName, "TPLine_" + g_symbol) == 0)
+        {
+‏            ObjectDelete(0, objectName);
+        }
+    }
+    
+‏    // Refresh chart
+‏    ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+‏//| Initialize log file                                              |
+//+------------------------------------------------------------------+
+‏bool InitializeLogFile()
+{
+‏    // Create file path
+‏    string terminalDataPath = TerminalInfoString(TERMINAL_DATA_PATH);
+‏    string mqlFilesPath = terminalDataPath + "\\MQL5\\Files\\";
+‏    string fileName = "TradeLog_" + g_symbol + ".csv";
+‏    g_log_file_path = mqlFilesPath + fileName;
+    
+‏    // Check if file exists
+‏    bool fileExists = FileIsExist(fileName);
+    
+‏    // Open or create file
+‏    g_log_file_handle = FileOpen(fileName, FILE_READ|FILE_WRITE|FILE_CSV);
+‏    if(g_log_file_handle == INVALID_HANDLE)
+    {
+‏        Print("Failed to open log file. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Write header if new file
+‏    if(!fileExists)
+    {
+‏        if(FileWrite(g_log_file_handle, "Symbol", "Time", "Type", "Price", "Lot", "StopLoss", "TakeProfit", "Profit") == 0)
+        {
+‏            Print("Failed to write header to log file. Error code: ", GetLastError());
+‏            FileClose(g_log_file_handle);
+‏            g_log_file_handle = INVALID_HANDLE;
+‏            return false;
+        }
+    }
+‏    else
+    {
+‏        // Move file pointer to end of file
+‏        FileSeek(g_log_file_handle, 0, SEEK_END);
+    }
+    
+‏    return true;
+}
+
+//+------------------------------------------------------------------+
+‏//| Log trade information                                            |
+//+------------------------------------------------------------------+
+‏bool LogTrade(datetime time, string type, double price, double lot, 
+‏             double sl, double tp, double profit)
+{
+‏    // Check if file handle is valid
+‏    if(g_log_file_handle == INVALID_HANDLE)
+    {
+‏        // Try to reinitialize log file
+‏        if(!InitializeLogFile())
+        {
+‏            return false;
+        }
+    }
+    
+‏    // Format time
+‏    string timeStr = TimeToString(time, TIME_DATE|TIME_MINUTES|TIME_SECONDS);
+    
+‏    // Write trade record to file
+‏    if(FileWrite(g_log_file_handle, g_symbol, timeStr, type, 
+‏               DoubleToString(price, g_digits), DoubleToString(lot, 2), 
+‏               DoubleToString(sl, g_digits), DoubleToString(tp, g_digits), 
+‏               DoubleToString(profit, 2)) == 0)
+    {
+‏        Print("Failed to write trade record to log file. Error code: ", GetLastError());
+‏        return false;
+    }
+    
+‏    // Flush file buffer
+‏    FileFlush(g_log_file_handle);
+    
+‏    return true;
+}
+
+//+------------------------------------------------------------------+
+‏//| Get RSI value                                                    |
+//+------------------------------------------------------------------+
+‏double GetRSI(int shift)
+{
+‏    double buffer[];
+‏    ArraySetAsSeries(buffer, true);
+    
+‏    if(CopyBuffer(g_rsi_handle, 0, shift, 1, buffer) <= 0)
+    {
+‏        Print("Failed to get RSI value. Error code: ", GetLastError());
+‏        return 0.0;
+    }
+    
+‏    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+‏//| Get MACD main line value                                         |
+//+------------------------------------------------------------------+
+‏double GetMACDMain(int shift)
+{
+‏    double buffer[];
+‏    ArraySetAsSeries(buffer, true);
+    
+‏    if(CopyBuffer(g_macd_handle, 0, shift, 1, buffer) <= 0)
+    {
+‏        Print("Failed to get MACD main line value. Error code: ", GetLastError());
+‏        return 0.0;
+    }
+    
+‏    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+‏//| Get MACD signal line value                                       |
+//+------------------------------------------------------------------+
+‏double GetMACDSignal(int shift)
+{
+‏    double buffer[];
+‏    ArraySetAsSeries(buffer, true);
+    
+‏    if(CopyBuffer(g_macd_handle, 1, shift, 1, buffer) <= 0)
+    {
+‏        Print("Failed to get MACD signal line value. Error code: ", GetLastError());
+‏        return 0.0;
+    }
+    
+‏    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+‏//| Get EMA(5) value                                                 |
+//+------------------------------------------------------------------+
+‏double GetEMA5(int shift)
+{
+‏    double buffer[];
+‏    ArraySetAsSeries(buffer, true);
+    
+‏    if(CopyBuffer(g_ema5_handle, 0, shift, 1, buffer) <= 0)
+    {
+‏        Print("Failed to get EMA(5) value. Error code: ", GetLastError());
+‏        return 0.0;
+    }
+    
+‏    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+‏//| Get EMA(20) value                                                |
+//+------------------------------------------------------------------+
+‏double GetEMA20(int shift)
+{
+‏    double buffer[];
+‏    ArraySetAsSeries(buffer, true);
+    
+‏    if(CopyBuffer(g_ema20_handle, 0, shift, 1, buffer) <= 0)
+    {
+‏        Print("Failed to get EMA(20) value. Error code: ", GetLastError());
+‏        return 0.0;
+    }
+    
+‏    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+‏//| Get EMA(100) value                                               |
+//+------------------------------------------------------------------+
+‏double GetEMA100(int shift)
+{
+‏    double buffer[];
+‏    ArraySetAsSeries(buffer, true);
+    
+‏    if(CopyBuffer(g_ema100_handle, 0, shift, 1, buffer) <= 0)
+    {
+‏        Print("Failed to get EMA(100) value. Error code: ", GetLastError());
+‏        return 0.0;
+    }
+    
+‏    return buffer[0];
+}
+
+//+------------------------------------------------------------------+
+‏//| Get ATR value                                                    |
+//+------------------------------------------------------------------+
+‏double GetATR(int shift)
+{
+‏    double buffer[];
+‏    ArraySetAsSeries(buffer, true);
+    
+‏    if(CopyBuffer(g_atr_handle, 0, shift, 1, buffer) <= 0)
+    {
+‏        Print("Failed to get ATR value. Error code: ", GetLastError());
+‏        return 0.0;
+    }
+    
+‏    return buffer[0];
+}
